@@ -6,9 +6,13 @@ mod selection;
 mod settings;
 mod tray;
 
+use tauri::Manager;
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            let core = core::ApplicationCore::start()?;
+            app.manage(core);
             tray::setup(app)?;
             Ok(())
         })

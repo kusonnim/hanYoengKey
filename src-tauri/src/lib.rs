@@ -1,4 +1,4 @@
-mod converter;
+pub mod converter;
 mod core;
 mod hook;
 mod replace;

@@ -3,7 +3,10 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use crate::hook::KeyboardEvent;
+use crate::{
+    hook::KeyboardEvent,
+    selection::{SelectionResult, SelectionService},
+};
 
 pub(super) struct EventDispatcher {
     worker: Option<JoinHandle<()>>,
@@ -15,10 +18,14 @@ impl EventDispatcher {
         let worker = thread::Builder::new()
             .name("event-dispatcher".into())
             .spawn(move || {
+                let selection_service = SelectionService::new();
+
                 while let Ok(event) = receiver.recv() {
-                    // Phase 2 has no subscribers. Console output provides a
-                    // temporary observable endpoint for manual verification.
-                    println!("Keyboard event: {event:?}");
+                    match event {
+                        KeyboardEvent::HangulKeyPressed => {
+                            print_selection(selection_service.get_selected_text());
+                        }
+                    }
                 }
             })?;
 
@@ -28,6 +35,15 @@ impl EventDispatcher {
             },
             sender,
         ))
+    }
+}
+
+fn print_selection(result: SelectionResult) {
+    match result {
+        SelectionResult::Success(text) => println!("Selected text: {text}"),
+        SelectionResult::NoSelection => println!("Selected text: <none>"),
+        SelectionResult::Unsupported => println!("Selected text: <unsupported>"),
+        SelectionResult::Failure(error) => eprintln!("Selection failed: {error}"),
     }
 }
 

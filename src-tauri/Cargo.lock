@@ -1177,6 +1177,7 @@ dependencies = [
  "tauri-build",
  "thiserror 2.0.19",
  "windows",
+ "windows-core 0.61.2",
 ]
 
 [[package]]

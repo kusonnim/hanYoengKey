@@ -148,15 +148,23 @@ Responsible for:
 
 ## Settings
 
-Responsible only for configuration.
+The Settings Store is the single source of truth for strongly typed
+configuration. During startup it loads and validates the local JSON file,
+recovers to defaults when the file is missing or corrupt, reconciles Windows
+startup registration, and writes through a temporary file plus atomic replace.
 
-Examples:
+The Tauri command boundary exposes settings values and update/reset operations;
+the frontend never receives filesystem access. Successful updates are persisted
+before the in-memory snapshot changes. Startup registration is performed
+through a platform boundary and a failed registration rejects that update so
+the stored value remains consistent.
 
-- startup option
-- hotkey
-- update preferences
-
-Settings must not contain business logic.
+Runtime consumers receive immutable snapshots through a shared runtime view and
+an observer channel. The dispatcher applies the conversion enable switch and
+hotkey mode before starting any selection work. Provider preferences are passed
+into selection and replacement operations rather than manipulated by the
+Settings module. This keeps configuration ownership separate from hook,
+service, and conversion behavior.
 
 ---
 

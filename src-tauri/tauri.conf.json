@@ -15,7 +15,7 @@
         "label": "settings",
         "title": "HanYeongKey Settings",
         "width": 480,
-        "height": 320,
+        "height": 560,
         "resizable": false,
         "visible": false,
         "skipTaskbar": true,

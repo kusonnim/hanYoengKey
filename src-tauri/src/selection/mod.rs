@@ -15,6 +15,7 @@ pub(crate) use result::{SelectionError, SelectionResult, SelectionSnapshot};
 
 #[cfg(windows)]
 use {
+    crate::settings::ProviderPreference,
     clipboard::ClipboardProvider,
     provider::SelectionProvider,
     uia::UiAutomationProvider,
@@ -36,7 +37,11 @@ impl SelectionService {
         }
     }
 
-    pub(crate) fn get_selected_text(&self) -> SelectionResult {
+    pub(crate) fn get_selected_text(
+        &self,
+        preference: ProviderPreference,
+        debug_logging: bool,
+    ) -> SelectionResult {
         let Some(target) = crate::target::TargetIdentity::capture() else {
             return SelectionResult::Unsupported;
         };
@@ -45,27 +50,10 @@ impl SelectionService {
             Err(error) => return SelectionResult::Failure(SelectionError::Com(error)),
         };
 
-        let result = match self.preferred.get_selected_text() {
-            SelectionResult::Success(snapshot) => {
-                eprintln!("[selection] provider=uia outcome=success");
-                SelectionResult::Success(snapshot)
-            }
-            SelectionResult::NoSelection => SelectionResult::NoSelection,
-            SelectionResult::TargetChanged => SelectionResult::TargetChanged,
-            SelectionResult::Unsupported => {
-                eprintln!("[selection] provider=clipboard-fallback");
-                self.fallback.get_selected_text()
-            }
-            SelectionResult::TimedOut => SelectionResult::TimedOut,
-            SelectionResult::Failure(preferred_error) => match self.fallback.get_selected_text() {
-                SelectionResult::Failure(fallback_error) => {
-                    SelectionResult::Failure(SelectionError::ProvidersFailed {
-                        preferred: preferred_error.to_string(),
-                        fallback: fallback_error.to_string(),
-                    })
-                }
-                result => result,
-            },
+        let result = match preference {
+            ProviderPreference::UiAutomationOnly => self.preferred.get_selected_text(),
+            ProviderPreference::ClipboardOnly => self.fallback.get_selected_text(),
+            ProviderPreference::Automatic => self.get_automatic(debug_logging),
         };
 
         match result {
@@ -80,6 +68,35 @@ impl SelectionService {
                 SelectionResult::Success(snapshot)
             }
             result => result,
+        }
+    }
+
+    fn get_automatic(&self, debug_logging: bool) -> SelectionResult {
+        match self.preferred.get_selected_text() {
+            SelectionResult::Success(snapshot) => {
+                if debug_logging {
+                    eprintln!("[selection] provider=uia outcome=success");
+                }
+                SelectionResult::Success(snapshot)
+            }
+            SelectionResult::NoSelection => SelectionResult::NoSelection,
+            SelectionResult::TargetChanged => SelectionResult::TargetChanged,
+            SelectionResult::Unsupported => {
+                if debug_logging {
+                    eprintln!("[selection] provider=clipboard-fallback");
+                }
+                self.fallback.get_selected_text()
+            }
+            SelectionResult::TimedOut => SelectionResult::TimedOut,
+            SelectionResult::Failure(preferred_error) => match self.fallback.get_selected_text() {
+                SelectionResult::Failure(fallback_error) => {
+                    SelectionResult::Failure(SelectionError::ProvidersFailed {
+                        preferred: preferred_error.to_string(),
+                        fallback: fallback_error.to_string(),
+                    })
+                }
+                result => result,
+            },
         }
     }
 }

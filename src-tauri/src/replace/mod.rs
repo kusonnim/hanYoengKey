@@ -13,6 +13,7 @@ pub(crate) use result::{ReplaceError, ReplaceResult};
 #[cfg(windows)]
 use {
     crate::selection::SelectionSnapshot,
+    crate::settings::ProviderPreference,
     clipboard::ClipboardProvider,
     provider::ReplaceProvider,
     uia::UiAutomationProvider,
@@ -38,6 +39,8 @@ impl ReplaceService {
         &self,
         selection: &SelectionSnapshot,
         replacement: &str,
+        preference: ProviderPreference,
+        debug_logging: bool,
     ) -> ReplaceResult {
         if !selection.target.is_current() {
             return ReplaceResult::TargetChanged;
@@ -47,9 +50,30 @@ impl ReplaceService {
             Err(error) => return ReplaceResult::Failure(ReplaceError::Com(error)),
         };
 
+        match preference {
+            ProviderPreference::UiAutomationOnly => {
+                self.preferred.replace_selected_text(selection, replacement)
+            }
+            ProviderPreference::ClipboardOnly => {
+                self.fallback.replace_selected_text(selection, replacement)
+            }
+            ProviderPreference::Automatic => {
+                self.replace_automatic(selection, replacement, debug_logging)
+            }
+        }
+    }
+
+    fn replace_automatic(
+        &self,
+        selection: &SelectionSnapshot,
+        replacement: &str,
+        debug_logging: bool,
+    ) -> ReplaceResult {
         match self.preferred.replace_selected_text(selection, replacement) {
             ReplaceResult::Unsupported => {
-                eprintln!("[replace] provider=clipboard-fallback");
+                if debug_logging {
+                    eprintln!("[replace] provider=clipboard-fallback");
+                }
                 self.fallback.replace_selected_text(selection, replacement)
             }
             ReplaceResult::Failure(preferred_error) => {

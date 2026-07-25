@@ -4,7 +4,10 @@ mod coordinator;
 mod direction;
 mod dispatcher;
 
-use crate::hook::{HookError, KeyboardHook};
+use crate::{
+    hook::{HookError, KeyboardHook},
+    settings::{Settings, SettingsRuntime},
+};
 use dispatcher::EventDispatcher;
 use thiserror::Error;
 
@@ -24,10 +27,13 @@ pub(crate) struct ApplicationCore {
 }
 
 impl ApplicationCore {
-    pub(crate) fn start() -> Result<Self, CoreError> {
+    pub(crate) fn start(
+        settings: SettingsRuntime,
+        settings_updates: std::sync::mpsc::Receiver<Settings>,
+    ) -> Result<Self, CoreError> {
         eprintln!("[lifecycle] application-starting");
-        let (dispatcher, event_sender) =
-            EventDispatcher::start().map_err(CoreError::DispatcherThread)?;
+        let (dispatcher, event_sender) = EventDispatcher::start(settings, settings_updates)
+            .map_err(CoreError::DispatcherThread)?;
         let keyboard_hook = KeyboardHook::install(event_sender)?;
 
         eprintln!("[lifecycle] application-started");

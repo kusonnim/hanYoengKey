@@ -4,6 +4,7 @@ use crate::{
     converter::{self, ConversionDirection},
     replace::{ReplaceResult, ReplaceService},
     selection::{SelectionResult, SelectionService, SelectionSnapshot},
+    settings::Settings,
 };
 
 use super::direction::choose_direction;
@@ -49,7 +50,7 @@ impl ConversionOutcome {
 }
 
 pub(super) trait SelectionReader {
-    fn selected_text(&self) -> SelectionResult;
+    fn selected_text(&self, settings: &Settings) -> SelectionResult;
 }
 
 pub(super) trait TextConverter {
@@ -58,7 +59,12 @@ pub(super) trait TextConverter {
 
 pub(super) trait SelectionReplacer {
     fn target_is_current(&self, selection: &SelectionSnapshot) -> bool;
-    fn replace(&self, selection: &SelectionSnapshot, replacement: &str) -> ReplaceResult;
+    fn replace(
+        &self,
+        selection: &SelectionSnapshot,
+        replacement: &str,
+        settings: &Settings,
+    ) -> ReplaceResult;
 }
 
 pub(super) struct ConversionCoordinator<S, C, R> {
@@ -83,7 +89,7 @@ where
         }
     }
 
-    pub(super) fn process(&self) -> ConversionOutcome {
+    pub(super) fn process(&self, settings: &Settings) -> ConversionOutcome {
         {
             let mut state = self.state();
             if *state != OperationState::Idle {
@@ -93,21 +99,25 @@ where
         }
         let _reset = StateReset(&self.state);
 
-        let outcome = self.process_inner();
+        let outcome = self.process_inner(settings);
         *self.state() = OperationState::Completed;
-        eprintln!("{}", diagnostic_line(outcome));
+        if settings.debug_logging {
+            eprintln!("{}", diagnostic_line(outcome));
+        }
         outcome
     }
 
-    fn process_inner(&self) -> ConversionOutcome {
-        let selection = match self.selection.selected_text() {
+    fn process_inner(&self, settings: &Settings) -> ConversionOutcome {
+        let selection = match self.selection.selected_text(settings) {
             SelectionResult::Success(snapshot) => snapshot,
             SelectionResult::NoSelection => return failed(OperationError::NoSelection),
             SelectionResult::Unsupported => return failed(OperationError::UnsupportedTarget),
             SelectionResult::TargetChanged => return failed(OperationError::TargetChanged),
             SelectionResult::TimedOut => return failed(OperationError::SelectionReadTimeout),
             SelectionResult::Failure(error) => {
-                eprintln!("[conversion] category=selection-provider-failure detail={error}");
+                if settings.debug_logging {
+                    eprintln!("[conversion] category=selection-provider-failure detail={error}");
+                }
                 return failed(OperationError::UIAutomationFailure);
             }
         };
@@ -127,7 +137,7 @@ where
         };
 
         *self.state() = OperationState::Replacing;
-        let outcome = match self.replacer.replace(&selection, &replacement) {
+        let outcome = match self.replacer.replace(&selection, &replacement, settings) {
             ReplaceResult::Replaced => ConversionOutcome::Converted,
             ReplaceResult::Unsupported => failed(OperationError::UnsupportedTarget),
             ReplaceResult::TemporarilyUnavailable => failed(OperationError::ClipboardBusy),
@@ -137,7 +147,9 @@ where
                 failed(OperationError::ClipboardChangedExternally)
             }
             ReplaceResult::Failure(error) => {
-                eprintln!("[conversion] category=replacement-failure detail={error}");
+                if settings.debug_logging {
+                    eprintln!("[conversion] category=replacement-failure detail={error}");
+                }
                 failed(OperationError::ReplacementFailure)
             }
         };
@@ -180,8 +192,8 @@ impl TextConverter for ConversionEngine {
 }
 
 impl SelectionReader for SelectionService {
-    fn selected_text(&self) -> SelectionResult {
-        self.get_selected_text()
+    fn selected_text(&self, settings: &Settings) -> SelectionResult {
+        self.get_selected_text(settings.selection_provider, settings.debug_logging)
     }
 }
 
@@ -190,8 +202,18 @@ impl SelectionReplacer for ReplaceService {
         selection.target.is_current()
     }
 
-    fn replace(&self, selection: &SelectionSnapshot, replacement: &str) -> ReplaceResult {
-        self.replace_selected_text(selection, replacement)
+    fn replace(
+        &self,
+        selection: &SelectionSnapshot,
+        replacement: &str,
+        settings: &Settings,
+    ) -> ReplaceResult {
+        self.replace_selected_text(
+            selection,
+            replacement,
+            settings.replacement_provider,
+            settings.debug_logging,
+        )
     }
 }
 
@@ -221,7 +243,7 @@ mod tests {
     struct FakeSelection(SelectionResult);
 
     impl SelectionReader for FakeSelection {
-        fn selected_text(&self) -> SelectionResult {
+        fn selected_text(&self, _settings: &Settings) -> SelectionResult {
             match &self.0 {
                 SelectionResult::Success(snapshot) => SelectionResult::Success(snapshot.clone()),
                 SelectionResult::NoSelection => SelectionResult::NoSelection,
@@ -254,7 +276,12 @@ mod tests {
             self.target_current
         }
 
-        fn replace(&self, _selection: &SelectionSnapshot, _replacement: &str) -> ReplaceResult {
+        fn replace(
+            &self,
+            _selection: &SelectionSnapshot,
+            _replacement: &str,
+            _settings: &Settings,
+        ) -> ReplaceResult {
             self.calls.fetch_add(1, Ordering::Relaxed);
             match self.result {
                 ReplaceResult::Replaced => ReplaceResult::Replaced,
@@ -309,7 +336,10 @@ mod tests {
             ReplaceResult::Replaced,
             true,
         );
-        assert_eq!(coordinator.process(), failed(OperationError::NoSelection));
+        assert_eq!(
+            coordinator.process(&Settings::default()),
+            failed(OperationError::NoSelection)
+        );
         assert_eq!(calls.load(Ordering::Relaxed), 0);
         assert_eq!(*coordinator.state(), OperationState::Idle);
     }
@@ -322,7 +352,10 @@ mod tests {
             ReplaceResult::Replaced,
             false,
         );
-        assert_eq!(coordinator.process(), failed(OperationError::TargetChanged));
+        assert_eq!(
+            coordinator.process(&Settings::default()),
+            failed(OperationError::TargetChanged)
+        );
         assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 
@@ -334,7 +367,10 @@ mod tests {
             ReplaceResult::TargetChanged,
             true,
         );
-        assert_eq!(coordinator.process(), failed(OperationError::TargetChanged));
+        assert_eq!(
+            coordinator.process(&Settings::default()),
+            failed(OperationError::TargetChanged)
+        );
         assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 
@@ -347,7 +383,7 @@ mod tests {
             true,
         );
         assert_eq!(
-            coordinator.process(),
+            coordinator.process(&Settings::default()),
             failed(OperationError::ConversionFailure)
         );
         assert_eq!(calls.load(Ordering::Relaxed), 0);
@@ -362,7 +398,10 @@ mod tests {
             ReplaceResult::Replaced,
             true,
         );
-        assert_eq!(coordinator.process(), ConversionOutcome::Converted);
+        assert_eq!(
+            coordinator.process(&Settings::default()),
+            ConversionOutcome::Converted
+        );
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(*coordinator.state(), OperationState::Idle);
     }
@@ -377,7 +416,7 @@ mod tests {
         );
         *coordinator.state() = OperationState::ReadingSelection;
         assert_eq!(
-            coordinator.process(),
+            coordinator.process(&Settings::default()),
             failed(OperationError::OperationAlreadyInProgress)
         );
     }
@@ -391,7 +430,7 @@ mod tests {
             true,
         );
         assert_eq!(
-            replacement_timeout.process(),
+            replacement_timeout.process(&Settings::default()),
             failed(OperationError::ReplacementTimeout)
         );
         let (coordinator, _) = coordinator(
@@ -401,7 +440,7 @@ mod tests {
             true,
         );
         assert_eq!(
-            coordinator.process(),
+            coordinator.process(&Settings::default()),
             failed(OperationError::SelectionReadTimeout)
         );
     }

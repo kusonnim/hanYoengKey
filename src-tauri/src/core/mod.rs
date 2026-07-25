@@ -1,5 +1,7 @@
 //! Application lifecycle coordination.
 
+mod coordinator;
+mod direction;
 mod dispatcher;
 
 use crate::hook::{HookError, KeyboardHook};

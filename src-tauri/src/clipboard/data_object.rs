@@ -248,7 +248,7 @@ fn format_matches(stored: &FORMATETC, requested: &FORMATETC) -> bool {
 }
 
 fn clone_format(source: &FORMATETC) -> WindowsResult<FORMATETC> {
-    let mut cloned = source.clone();
+    let mut cloned = *source;
     cloned.ptd = clone_target_device(source.ptd)?;
     Ok(cloned)
 }

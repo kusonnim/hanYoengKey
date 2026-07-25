@@ -10,4 +10,4 @@ mod windows;
 
 pub(crate) use event::KeyboardEvent;
 #[cfg(windows)]
-pub(crate) use windows::{HookError, KeyboardHook};
+pub(crate) use windows::{complete_event, HookError, KeyboardHook};

@@ -3,10 +3,9 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use crate::{
-    hook::KeyboardEvent,
-    selection::{SelectionResult, SelectionService},
-};
+use crate::hook::{complete_event, KeyboardEvent};
+
+use super::coordinator::{ApplicationConversionCoordinator, ConversionOutcome};
 
 pub(super) struct EventDispatcher {
     worker: Option<JoinHandle<()>>,
@@ -18,12 +17,19 @@ impl EventDispatcher {
         let worker = thread::Builder::new()
             .name("event-dispatcher".into())
             .spawn(move || {
-                let selection_service = SelectionService::new();
+                let coordinator = ApplicationConversionCoordinator::application();
 
                 while let Ok(event) = receiver.recv() {
                     match event {
                         KeyboardEvent::HangulKeyPressed => {
-                            print_selection(selection_service.get_selected_text());
+                            let outcome = coordinator.process();
+                            complete_event(outcome == ConversionOutcome::Converted);
+                            if !matches!(
+                                outcome,
+                                ConversionOutcome::Converted | ConversionOutcome::NoSelection
+                            ) {
+                                eprintln!("Conversion was not handled: {outcome:?}");
+                            }
                         }
                     }
                 }
@@ -35,15 +41,6 @@ impl EventDispatcher {
             },
             sender,
         ))
-    }
-}
-
-fn print_selection(result: SelectionResult) {
-    match result {
-        SelectionResult::Success(text) => println!("Selected text: {text}"),
-        SelectionResult::NoSelection => println!("Selected text: <none>"),
-        SelectionResult::Unsupported => println!("Selected text: <unsupported>"),
-        SelectionResult::Failure(error) => eprintln!("Selection failed: {error}"),
     }
 }
 

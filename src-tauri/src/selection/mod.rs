@@ -9,17 +9,14 @@ mod result;
 #[cfg(windows)]
 mod clipboard;
 #[cfg(windows)]
-mod data_object;
-#[cfg(windows)]
 mod uia;
 
-pub(crate) use result::SelectionResult;
+pub(crate) use result::{SelectionError, SelectionResult};
 
 #[cfg(windows)]
 use {
     clipboard::ClipboardProvider,
     provider::SelectionProvider,
-    result::SelectionError,
     uia::UiAutomationProvider,
     windows::Win32::System::Ole::{OleInitialize, OleUninitialize},
 };

@@ -1,3 +1,5 @@
+#[cfg(windows)]
+mod clipboard;
 pub mod converter;
 mod core;
 mod hook;

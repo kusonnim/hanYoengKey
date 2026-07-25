@@ -92,7 +92,8 @@ The hook never performs text conversion.
 
 ## Selection Service
 
-Responsible for reading and replacing selected text.
+Responsible for reading selected text and capturing provider-neutral target
+identity.
 
 Preferred implementation:
 
@@ -275,6 +276,59 @@ The application should:
 - respond immediately after the Hangul/English key is pressed
 
 The utility should feel invisible during normal computer usage.
+
+---
+
+# Conversion Operation State
+
+The application coordinator owns one conversion operation at a time:
+
+```text
+Idle
+  -> ReadingSelection
+  -> ValidatingTarget
+  -> Converting
+  -> Replacing
+  -> RestoringClipboard
+  -> Completed
+  -> Idle
+```
+
+Every success and failure path uses a scope guard to return to `Idle`.
+Concurrent activations are rejected while another operation is active.
+
+Selection results include a provider-neutral target snapshot containing the
+foreground window, focused control, process, and GUI thread identity.
+Replacement validates that identity again. The clipboard replacement provider
+also copies and compares the current selection with the original snapshot
+immediately before pasting.
+
+UI Automation selection and replacement calls have bounded worker deadlines.
+Clipboard locking, access retries, simulated copy, paste settling, and
+restoration also use bounded deadlines. Timeout and target-change outcomes are
+returned as structured categories rather than blocking the hook thread.
+
+Clipboard transactions are serialized. They capture all enumerable formats,
+track the clipboard sequence number after each utility-owned write, and restore
+only while that sequence is still current. If another application or the user
+changes the clipboard, the newer contents win and the saved snapshot is not
+restored over them.
+
+Synthetic input carries a private marker that the low-level hook ignores.
+Copy and paste injection rejects conflicting Shift, Alt, or Windows modifiers,
+respects an already-held Control key, and releases only keys introduced by the
+utility after a partial injection.
+
+The Windows hook recognizes `VK_HANGUL`/`VK_KANA` (`0x15`) and the Korean
+Hangul-key scan-code form `0x72`. Only key-down starts an operation; key-up,
+auto-repeat, held-key repeats, and utility-injected input do not.
+
+Operation errors are consolidated into privacy-safe categories including no
+selection, unsupported target, target changed, clipboard busy or externally
+changed, selection/replacement timeout, UI Automation failure, replacement or
+conversion failure, concurrent operation, and internal failure. Diagnostics
+log lifecycle, provider choice, and categories without selected or clipboard
+contents.
 
 ---
 

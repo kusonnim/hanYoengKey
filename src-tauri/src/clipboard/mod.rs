@@ -3,9 +3,10 @@
 mod data_object;
 
 use std::{
+    cell::Cell,
     mem::size_of,
     ptr,
-    sync::{Mutex, OnceLock},
+    sync::{Mutex, OnceLock, TryLockError},
     thread,
     time::{Duration, Instant},
 };
@@ -20,8 +21,8 @@ use windows::{
                 CoTaskMemFree, IDataObject, DATADIR_GET, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL,
             },
             DataExchange::{
-                CloseClipboard, CountClipboardFormats, EmptyClipboard, OpenClipboard,
-                SetClipboardData,
+                CloseClipboard, CountClipboardFormats, EmptyClipboard, GetClipboardSequenceNumber,
+                OpenClipboard, SetClipboardData,
             },
             Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE},
             Ole::{
@@ -50,20 +51,32 @@ pub(crate) enum ClipboardError {
     Write(#[source] WindowsError),
     #[error("could not restore the clipboard: {0}")]
     Restore(#[source] WindowsError),
+    #[error("clipboard remained busy until the retry deadline")]
+    Busy,
+    #[error("clipboard changed externally; newer contents were preserved")]
+    ChangedExternally,
+    #[error("the active target or selection changed")]
+    TargetChanged,
+    #[error("clipboard copy did not complete before the deadline")]
+    CopyTimedOut,
+    #[error("synthetic shortcut could not be sent safely")]
+    ShortcutUnavailable,
 }
 
 pub(crate) fn transaction<T>(
     operation: impl FnOnce(&ClipboardSnapshot) -> Result<T, ClipboardError>,
 ) -> Result<T, ClipboardError> {
-    let _guard = TRANSACTION_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = lock_transaction()?;
     let snapshot = ClipboardSnapshot::capture()?;
     let result = operation(&snapshot);
-    let restoration = snapshot.restore();
+    finish_transaction(result, || snapshot.restore())
+}
 
-    match (result, restoration) {
+fn finish_transaction<T>(
+    operation: Result<T, ClipboardError>,
+    restore: impl FnOnce() -> Result<(), ClipboardError>,
+) -> Result<T, ClipboardError> {
+    match (operation, restore()) {
         (_, Err(error)) => Err(error),
         (result, Ok(())) => result,
     }
@@ -71,24 +84,41 @@ pub(crate) fn transaction<T>(
 
 pub(crate) struct ClipboardSnapshot {
     data: Option<IDataObject>,
-    restored: bool,
+    expected_sequence: Cell<u32>,
+    finished: bool,
 }
 
 impl ClipboardSnapshot {
     fn capture() -> Result<Self, ClipboardError> {
+        let sequence_before = unsafe { GetClipboardSequenceNumber() };
+        let data = materialize_clipboard()?;
+        let sequence_after = unsafe { GetClipboardSequenceNumber() };
+        if sequence_before != sequence_after {
+            return Err(ClipboardError::ChangedExternally);
+        }
         Ok(Self {
-            data: materialize_clipboard()?,
-            restored: false,
+            data,
+            expected_sequence: Cell::new(sequence_after),
+            finished: false,
         })
     }
 
     fn restore(mut self) -> Result<(), ClipboardError> {
-        self.restore_inner()?;
-        self.restored = true;
-        Ok(())
+        self.finished = true;
+        self.restore_if_owned()
     }
 
-    fn restore_inner(&self) -> Result<(), ClipboardError> {
+    pub(crate) fn mark_current_as_owned(&self) {
+        self.expected_sequence
+            .set(unsafe { GetClipboardSequenceNumber() });
+    }
+
+    fn restore_if_owned(&self) -> Result<(), ClipboardError> {
+        if !clipboard_is_owned(self.expected_sequence.get(), unsafe {
+            GetClipboardSequenceNumber()
+        }) {
+            return Err(ClipboardError::ChangedExternally);
+        }
         retry(|| unsafe {
             match &self.data {
                 Some(data) => OleSetClipboard(data),
@@ -100,10 +130,14 @@ impl ClipboardSnapshot {
     }
 }
 
+fn clipboard_is_owned(expected_sequence: u32, current_sequence: u32) -> bool {
+    expected_sequence == current_sequence
+}
+
 impl Drop for ClipboardSnapshot {
     fn drop(&mut self) {
-        if !self.restored {
-            let _ = self.restore_inner();
+        if !self.finished {
+            let _ = self.restore_if_owned();
         }
     }
 }
@@ -147,7 +181,10 @@ pub(crate) fn read_unicode_text() -> Result<Option<String>, ClipboardError> {
     result
 }
 
-pub(crate) fn write_unicode_text(text: &str) -> Result<(), ClipboardError> {
+pub(crate) fn write_unicode_text(
+    text: &str,
+    ownership: &ClipboardSnapshot,
+) -> Result<(), ClipboardError> {
     let encoded: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     let byte_len = encoded.len() * size_of::<u16>();
     let memory = unsafe { GlobalAlloc(GMEM_MOVEABLE, byte_len) }.map_err(ClipboardError::Write)?;
@@ -172,7 +209,9 @@ pub(crate) fn write_unicode_text(text: &str) -> Result<(), ClipboardError> {
         OpenClipboard(None)?;
         let operation = (|| {
             EmptyClipboard()?;
+            ownership.mark_current_as_owned();
             SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(memory.0)))?;
+            ownership.mark_current_as_owned();
             Ok(())
         })();
         let _ = CloseClipboard();
@@ -234,11 +273,82 @@ fn free_format_target_device(format: &mut FORMATETC) {
 
 fn retry<T>(mut operation: impl FnMut() -> windows::core::Result<T>) -> windows::core::Result<T> {
     let deadline = Instant::now() + RETRY_TIMEOUT;
+    retry_until(deadline, &mut operation)
+}
+
+fn retry_until<T>(
+    deadline: Instant,
+    operation: &mut impl FnMut() -> windows::core::Result<T>,
+) -> windows::core::Result<T> {
     loop {
         match operation() {
             Ok(value) => return Ok(value),
             Err(_) if Instant::now() < deadline => thread::sleep(RETRY_INTERVAL),
             Err(error) => return Err(error),
         }
+    }
+}
+
+fn lock_transaction() -> Result<std::sync::MutexGuard<'static, ()>, ClipboardError> {
+    let lock = TRANSACTION_LOCK.get_or_init(|| Mutex::new(()));
+    let deadline = Instant::now() + RETRY_TIMEOUT;
+    loop {
+        match lock.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(RETRY_INTERVAL);
+            }
+            Err(TryLockError::WouldBlock) => return Err(ClipboardError::Busy),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_is_bounded() {
+        let mut attempts = 0;
+        let result: windows::core::Result<()> = retry_until(Instant::now(), &mut || {
+            attempts += 1;
+            Err(windows::core::Error::from_win32())
+        });
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn retry_recovers_from_temporary_failure() {
+        let mut attempts = 0;
+        let result = retry_until(Instant::now() + Duration::from_millis(50), &mut || {
+            attempts += 1;
+            if attempts < 3 {
+                Err(windows::core::Error::from_win32())
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result.is_ok());
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn external_clipboard_change_prevents_restoration() {
+        assert!(clipboard_is_owned(10, 10));
+        assert!(!clipboard_is_owned(10, 11));
+    }
+
+    #[test]
+    fn restoration_is_attempted_after_operation_failure() {
+        let mut restored = false;
+        let result: Result<(), ClipboardError> =
+            finish_transaction(Err(ClipboardError::TargetChanged), || {
+                restored = true;
+                Ok(())
+            });
+        assert!(matches!(result, Err(ClipboardError::TargetChanged)));
+        assert!(restored);
     }
 }

@@ -3,9 +3,13 @@ mod clipboard;
 pub mod converter;
 mod core;
 mod hook;
+#[cfg(windows)]
+mod input;
 mod replace;
 mod selection;
 mod settings;
+#[cfg(windows)]
+mod target;
 mod tray;
 
 use tauri::Manager;

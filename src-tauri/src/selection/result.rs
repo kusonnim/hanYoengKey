@@ -1,10 +1,29 @@
 use thiserror::Error;
 
+use crate::target::TargetIdentity;
+
+#[derive(Debug, Clone)]
+pub(crate) struct SelectionSnapshot {
+    pub(crate) text: String,
+    pub(crate) target: TargetIdentity,
+}
+
+impl SelectionSnapshot {
+    pub(crate) fn capture(text: String) -> Option<Self> {
+        Some(Self {
+            text,
+            target: TargetIdentity::capture()?,
+        })
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum SelectionResult {
-    Success(String),
+    Success(SelectionSnapshot),
     NoSelection,
     Unsupported,
+    TargetChanged,
+    TimedOut,
     Failure(SelectionError),
 }
 

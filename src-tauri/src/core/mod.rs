@@ -25,13 +25,21 @@ pub(crate) struct ApplicationCore {
 
 impl ApplicationCore {
     pub(crate) fn start() -> Result<Self, CoreError> {
+        eprintln!("[lifecycle] application-starting");
         let (dispatcher, event_sender) =
             EventDispatcher::start().map_err(CoreError::DispatcherThread)?;
         let keyboard_hook = KeyboardHook::install(event_sender)?;
 
+        eprintln!("[lifecycle] application-started");
         Ok(Self {
             _keyboard_hook: keyboard_hook,
             _dispatcher: dispatcher,
         })
+    }
+}
+
+impl Drop for ApplicationCore {
+    fn drop(&mut self) {
+        eprintln!("[lifecycle] application-stopping");
     }
 }

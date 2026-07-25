@@ -11,7 +11,7 @@ mod clipboard;
 #[cfg(windows)]
 mod uia;
 
-pub(crate) use result::{SelectionError, SelectionResult};
+pub(crate) use result::{SelectionError, SelectionResult, SelectionSnapshot};
 
 #[cfg(windows)]
 use {
@@ -37,14 +37,26 @@ impl SelectionService {
     }
 
     pub(crate) fn get_selected_text(&self) -> SelectionResult {
+        let Some(target) = crate::target::TargetIdentity::capture() else {
+            return SelectionResult::Unsupported;
+        };
         let _apartment = match ComApartment::initialize() {
             Ok(apartment) => apartment,
             Err(error) => return SelectionResult::Failure(SelectionError::Com(error)),
         };
 
-        match self.preferred.get_selected_text() {
-            result @ (SelectionResult::Success(_) | SelectionResult::NoSelection) => result,
-            SelectionResult::Unsupported => self.fallback.get_selected_text(),
+        let result = match self.preferred.get_selected_text() {
+            SelectionResult::Success(snapshot) => {
+                eprintln!("[selection] provider=uia outcome=success");
+                SelectionResult::Success(snapshot)
+            }
+            SelectionResult::NoSelection => SelectionResult::NoSelection,
+            SelectionResult::TargetChanged => SelectionResult::TargetChanged,
+            SelectionResult::Unsupported => {
+                eprintln!("[selection] provider=clipboard-fallback");
+                self.fallback.get_selected_text()
+            }
+            SelectionResult::TimedOut => SelectionResult::TimedOut,
             SelectionResult::Failure(preferred_error) => match self.fallback.get_selected_text() {
                 SelectionResult::Failure(fallback_error) => {
                     SelectionResult::Failure(SelectionError::ProvidersFailed {
@@ -54,6 +66,20 @@ impl SelectionService {
                 }
                 result => result,
             },
+        };
+
+        match result {
+            SelectionResult::Success(mut snapshot) => {
+                let Some(current) = crate::target::TargetIdentity::capture() else {
+                    return SelectionResult::TargetChanged;
+                };
+                if current != target {
+                    return SelectionResult::TargetChanged;
+                }
+                snapshot.target = target;
+                SelectionResult::Success(snapshot)
+            }
+            result => result,
         }
     }
 }

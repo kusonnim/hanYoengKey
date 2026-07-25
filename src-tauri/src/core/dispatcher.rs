@@ -5,7 +5,7 @@ use std::{
 
 use crate::hook::{complete_event, KeyboardEvent};
 
-use super::coordinator::{ApplicationConversionCoordinator, ConversionOutcome};
+use super::coordinator::ApplicationConversionCoordinator;
 
 pub(super) struct EventDispatcher {
     worker: Option<JoinHandle<()>>,
@@ -23,13 +23,7 @@ impl EventDispatcher {
                     match event {
                         KeyboardEvent::HangulKeyPressed => {
                             let outcome = coordinator.process();
-                            complete_event(outcome == ConversionOutcome::Converted);
-                            if !matches!(
-                                outcome,
-                                ConversionOutcome::Converted | ConversionOutcome::NoSelection
-                            ) {
-                                eprintln!("Conversion was not handled: {outcome:?}");
-                            }
+                            complete_event(outcome.handled());
                         }
                     }
                 }

@@ -1,22 +1,20 @@
 use std::{
-    mem::size_of,
     thread,
     time::{Duration, Instant},
 };
 
 use windows::Win32::{
-    System::DataExchange::GetClipboardSequenceNumber,
-    UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
-        VK_CONTROL,
-    },
+    System::DataExchange::GetClipboardSequenceNumber, UI::Input::KeyboardAndMouse::VIRTUAL_KEY,
 };
 
-use crate::clipboard::{self, ClipboardError};
+use crate::{
+    clipboard::{self, ClipboardError},
+    input::send_control_shortcut,
+};
 
 use super::{
     provider::SelectionProvider,
-    result::{SelectionError, SelectionResult},
+    result::{SelectionError, SelectionResult, SelectionSnapshot},
 };
 
 const COPY_TIMEOUT: Duration = Duration::from_millis(300);
@@ -28,7 +26,9 @@ pub(super) struct ClipboardProvider;
 impl SelectionProvider for ClipboardProvider {
     fn get_selected_text(&self) -> SelectionResult {
         match clipboard_selection() {
-            Ok(Some(text)) if !text.is_empty() => SelectionResult::Success(text),
+            Ok(Some(text)) if !text.is_empty() => SelectionSnapshot::capture(text)
+                .map(SelectionResult::Success)
+                .unwrap_or(SelectionResult::TargetChanged),
             Ok(_) => SelectionResult::NoSelection,
             Err(ClipboardError::Restore(error)) => {
                 SelectionResult::Failure(SelectionError::ClipboardRestore(error))
@@ -39,10 +39,11 @@ impl SelectionProvider for ClipboardProvider {
 }
 
 fn clipboard_selection() -> Result<Option<String>, ClipboardError> {
-    clipboard::transaction(|_| {
+    clipboard::transaction(|snapshot| {
         let sequence_before = unsafe { GetClipboardSequenceNumber() };
         send_copy_shortcut()?;
         if wait_for_clipboard_change(sequence_before) {
+            snapshot.mark_current_as_owned();
             clipboard::read_unicode_text()
         } else {
             Ok(None)
@@ -51,34 +52,7 @@ fn clipboard_selection() -> Result<Option<String>, ClipboardError> {
 }
 
 fn send_copy_shortcut() -> Result<(), ClipboardError> {
-    let inputs = [
-        keyboard_input(VK_CONTROL, false),
-        keyboard_input(VK_C, false),
-        keyboard_input(VK_C, true),
-        keyboard_input(VK_CONTROL, true),
-    ];
-    let sent = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) };
-    if sent != inputs.len() as u32 {
-        return Err(ClipboardError::Write(windows::core::Error::from_win32()));
-    }
-    Ok(())
-}
-
-fn keyboard_input(key: VIRTUAL_KEY, key_up: bool) -> INPUT {
-    INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: key,
-                dwFlags: if key_up {
-                    KEYEVENTF_KEYUP
-                } else {
-                    Default::default()
-                },
-                ..Default::default()
-            },
-        },
-    }
+    send_control_shortcut(VK_C).map_err(|_| ClipboardError::ShortcutUnavailable)
 }
 
 fn wait_for_clipboard_change(previous: u32) -> bool {

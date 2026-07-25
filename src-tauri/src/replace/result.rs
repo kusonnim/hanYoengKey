@@ -5,6 +5,9 @@ pub(crate) enum ReplaceResult {
     Replaced,
     Unsupported,
     TemporarilyUnavailable,
+    TargetChanged,
+    TimedOut,
+    ClipboardChangedExternally,
     Failure(ReplaceError),
 }
 
@@ -18,8 +21,6 @@ pub(crate) enum ReplaceError {
     Clipboard(String),
     #[error("clipboard restoration failed: {0}")]
     ClipboardRestore(#[source] windows::core::Error),
-    #[error("paste input injection was blocked")]
-    PasteInputBlocked,
     #[error(
         "both replacement providers failed (UI Automation: {preferred}; clipboard: {fallback})"
     )]

@@ -11,10 +11,7 @@ use windows::Win32::{
     Foundation::{LPARAM, WPARAM},
     UI::{
         Input::{
-            Ime::{
-                ImmGetContext, ImmGetConversionStatus, ImmReleaseContext, ImmSetConversionStatus,
-                IME_CMODE_NATIVE, IME_CONVERSION_MODE, IME_SENTENCE_MODE,
-            },
+            Ime::{ImmGetContext, ImmGetOpenStatus, ImmReleaseContext, ImmSetOpenStatus},
             KeyboardAndMouse::{GetKeyboardLayout, GetKeyboardLayoutList, HKL},
         },
         WindowsAndMessaging::{PostMessageW, WM_INPUTLANGCHANGEREQUEST},
@@ -105,12 +102,10 @@ impl InputLanguageBackend for WindowsInputLanguageBackend {
         let layout = unsafe { GetKeyboardLayout(target.thread_id()) };
         match primary_language(layout) {
             PRIMARY_LANGUAGE_KOREAN => {
-                let (conversion, _) = ime_status(target)?;
-                if conversion.0 & IME_CMODE_NATIVE.0 != 0 {
-                    Ok(InputLanguage::Korean)
-                } else {
-                    Ok(InputLanguage::English)
-                }
+                let context = ImeContext::acquire(target)?;
+                Ok(language_from_korean_ime_open(
+                    unsafe { ImmGetOpenStatus(context.handle) }.as_bool(),
+                ))
             }
             PRIMARY_LANGUAGE_ENGLISH => Ok(InputLanguage::English),
             _ => Err(InputLanguageError::QueryFailed),
@@ -126,7 +121,7 @@ impl InputLanguageBackend for WindowsInputLanguageBackend {
         let current_layout = unsafe { GetKeyboardLayout(target.thread_id()) };
 
         if primary_language(current_layout) == PRIMARY_LANGUAGE_KOREAN {
-            return set_korean_ime_mode(target, desired);
+            return set_korean_ime_open(target, desired);
         }
 
         let desired_primary = match desired {
@@ -161,9 +156,9 @@ impl InputLanguageBackend for WindowsInputLanguageBackend {
         }
 
         if desired == InputLanguage::Korean {
-            set_korean_ime_mode(target, desired)?;
+            set_korean_ime_open(target, desired)?;
         }
-        Ok(())
+        verify_language(self, target, desired)
     }
 }
 
@@ -191,35 +186,43 @@ fn find_installed_layout(primary: u16) -> Option<HKL> {
         .find(|layout| primary_language(*layout) == primary)
 }
 
-fn ime_status(
-    target: &TargetIdentity,
-) -> Result<(IME_CONVERSION_MODE, IME_SENTENCE_MODE), InputLanguageError> {
-    ensure_target(target)?;
-    let context = ImeContext::acquire(target)?;
-    let mut conversion = IME_CONVERSION_MODE(0);
-    let mut sentence = IME_SENTENCE_MODE(0);
-    let queried = unsafe {
-        ImmGetConversionStatus(context.handle, Some(&mut conversion), Some(&mut sentence))
-    };
-    queried
-        .as_bool()
-        .then_some((conversion, sentence))
-        .ok_or(InputLanguageError::QueryFailed)
+fn language_from_korean_ime_open(open: bool) -> InputLanguage {
+    if open {
+        InputLanguage::Korean
+    } else {
+        InputLanguage::English
+    }
 }
 
-fn set_korean_ime_mode(
+fn desired_ime_open(desired: InputLanguage) -> bool {
+    desired == InputLanguage::Korean
+}
+
+fn set_korean_ime_open(
     target: &TargetIdentity,
     desired: InputLanguage,
 ) -> Result<(), InputLanguageError> {
-    let (mut conversion, sentence) = ime_status(target)?;
-    match desired {
-        InputLanguage::Korean => conversion.0 |= IME_CMODE_NATIVE.0,
-        InputLanguage::English => conversion.0 &= !IME_CMODE_NATIVE.0,
-    }
     ensure_target(target)?;
     let context = ImeContext::acquire(target)?;
-    unsafe { ImmSetConversionStatus(context.handle, conversion, sentence) }
+    unsafe { ImmSetOpenStatus(context.handle, desired_ime_open(desired)) }
         .as_bool()
+        .then_some(())
+        .ok_or(InputLanguageError::ChangeRejected)?;
+    ensure_target(target)?;
+
+    let applied =
+        language_from_korean_ime_open(unsafe { ImmGetOpenStatus(context.handle) }.as_bool());
+    (applied == desired)
+        .then_some(())
+        .ok_or(InputLanguageError::ChangeRejected)
+}
+
+fn verify_language(
+    backend: &WindowsInputLanguageBackend,
+    target: &TargetIdentity,
+    desired: InputLanguage,
+) -> Result<(), InputLanguageError> {
+    (backend.get(target)? == desired)
         .then_some(())
         .ok_or(InputLanguageError::ChangeRejected)
 }
@@ -310,5 +313,13 @@ mod tests {
             Err(InputLanguageError::TargetChanged)
         );
         assert_eq!(service.backend.set_calls.get(), 1);
+    }
+
+    #[test]
+    fn korean_ime_open_state_maps_to_hangul_mode() {
+        assert_eq!(language_from_korean_ime_open(true), InputLanguage::Korean);
+        assert_eq!(language_from_korean_ime_open(false), InputLanguage::English);
+        assert!(desired_ime_open(InputLanguage::Korean));
+        assert!(!desired_ime_open(InputLanguage::English));
     }
 }

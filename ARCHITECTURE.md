@@ -145,6 +145,8 @@ language of the focused control and GUI thread captured with the original
 selection. It inspects the keyboard layout and Korean IME conversion state,
 changes them only when necessary, and revalidates the captured target before
 every mutation. It never simulates another Hangul/English key press.
+For the Korean keyboard layout, Hangul/English mode is read and changed through
+the target input context's IME open status and verified after mutation.
 
 This service is invoked only after replacement succeeds. A synchronization
 error is reported as partial success: the converted text remains in place and

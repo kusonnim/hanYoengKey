@@ -12,13 +12,13 @@ use windows::Win32::{
     UI::{
         Input::{
             Ime::{ImmGetContext, ImmGetOpenStatus, ImmReleaseContext, ImmSetOpenStatus},
-            KeyboardAndMouse::{GetKeyboardLayout, GetKeyboardLayoutList, HKL},
+            KeyboardAndMouse::{GetKeyboardLayout, GetKeyboardLayoutList, HKL, VK_HANGUL},
         },
         WindowsAndMessaging::{PostMessageW, WM_INPUTLANGCHANGEREQUEST},
     },
 };
 
-use crate::target::TargetIdentity;
+use crate::{input::send_key_press, target::TargetIdentity};
 
 const PRIMARY_LANGUAGE_ENGLISH: u16 = 0x09;
 const PRIMARY_LANGUAGE_KOREAN: u16 = 0x12;
@@ -121,7 +121,7 @@ impl InputLanguageBackend for WindowsInputLanguageBackend {
         let current_layout = unsafe { GetKeyboardLayout(target.thread_id()) };
 
         if primary_language(current_layout) == PRIMARY_LANGUAGE_KOREAN {
-            return set_korean_ime_open(target, desired);
+            return ensure_korean_ime_state(self, target, desired);
         }
 
         let desired_primary = match desired {
@@ -156,7 +156,7 @@ impl InputLanguageBackend for WindowsInputLanguageBackend {
         }
 
         if desired == InputLanguage::Korean {
-            set_korean_ime_open(target, desired)?;
+            ensure_korean_ime_state(self, target, desired)?;
         }
         verify_language(self, target, desired)
     }
@@ -215,6 +215,45 @@ fn set_korean_ime_open(
     (applied == desired)
         .then_some(())
         .ok_or(InputLanguageError::ChangeRejected)
+}
+
+fn ensure_korean_ime_state(
+    backend: &WindowsInputLanguageBackend,
+    target: &TargetIdentity,
+    desired: InputLanguage,
+) -> Result<(), InputLanguageError> {
+    if backend.get(target)? == desired {
+        return Ok(());
+    }
+
+    if set_korean_ime_open(target, desired).is_ok() {
+        return Ok(());
+    }
+
+    // Recent Windows Korean IMEs may ignore ImmSetOpenStatus even though the
+    // call succeeds. A single marked Hangul-key input is used only after a
+    // verified mismatch and only while the captured target is still current.
+    ensure_target(target)?;
+    send_key_press(VK_HANGUL).map_err(|_| InputLanguageError::ChangeRejected)?;
+    wait_for_language(backend, target, desired)
+}
+
+fn wait_for_language(
+    backend: &WindowsInputLanguageBackend,
+    target: &TargetIdentity,
+    desired: InputLanguage,
+) -> Result<(), InputLanguageError> {
+    let deadline = Instant::now() + LAYOUT_CHANGE_TIMEOUT;
+    loop {
+        ensure_target(target)?;
+        if backend.get(target)? == desired {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(InputLanguageError::ChangeTimedOut);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn verify_language(

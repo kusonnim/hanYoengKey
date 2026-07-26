@@ -49,6 +49,25 @@ pub(crate) fn send_control_shortcut(key: VIRTUAL_KEY) -> Result<(), ShortcutErro
     Ok(())
 }
 
+pub(crate) fn send_key_press(key: VIRTUAL_KEY) -> Result<(), ShortcutError> {
+    if [VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN]
+        .into_iter()
+        .any(key_is_down)
+    {
+        return Err(ShortcutError::ConflictingModifier);
+    }
+
+    let inputs = [keyboard_input(key, false), keyboard_input(key, true)];
+    let sent = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) } as usize;
+    if sent != inputs.len() {
+        unsafe {
+            let _ = SendInput(&[keyboard_input(key, true)], size_of::<INPUT>() as i32);
+        }
+        return Err(ShortcutError::InjectionBlocked);
+    }
+    Ok(())
+}
+
 pub(crate) fn keyboard_input(key: VIRTUAL_KEY, key_up: bool) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,

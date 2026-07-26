@@ -144,9 +144,12 @@ The Windows-specific Input Language Service reads and synchronizes the input
 language of the focused control and GUI thread captured with the original
 selection. It inspects the keyboard layout and Korean IME conversion state,
 changes them only when necessary, and revalidates the captured target before
-every mutation. It never simulates another Hangul/English key press.
+every mutation. It never blindly simulates another Hangul/English key press.
 For the Korean keyboard layout, Hangul/English mode is read and changed through
 the target input context's IME open status and verified after mutation.
+If a modern Windows IME ignores the direct setter, the service revalidates the
+captured target and conditionally sends one marked Hangul toggle only while a
+verified mismatch remains, then verifies the resulting state.
 
 This service is invoked only after replacement succeeds. A synchronization
 error is reported as partial success: the converted text remains in place and

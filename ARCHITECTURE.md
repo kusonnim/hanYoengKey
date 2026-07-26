@@ -329,7 +329,10 @@ Selection results include a provider-neutral target snapshot containing the
 foreground window, focused control, process, and GUI thread identity.
 Replacement validates that identity again. The clipboard replacement provider
 also copies and compares the current selection with the original snapshot
-immediately before pasting.
+immediately before pasting. When UI Automation and clipboard APIs represent
+the same newline with different encodings, validation compares canonical line
+boundaries and the replacement adopts the clipboard selection's exact original
+CR, LF, or CRLF sequence.
 
 UI Automation selection and replacement calls have bounded worker deadlines.
 Clipboard locking, access retries, simulated copy, paste settling, and

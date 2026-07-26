@@ -1,5 +1,6 @@
 //! Provider-neutral identity for the control that owns a selection.
 
+use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO,
 };
@@ -47,6 +48,14 @@ impl TargetIdentity {
 
     pub(crate) fn is_current(self) -> bool {
         Self::capture() == Some(self)
+    }
+
+    pub(crate) fn focused_window(self) -> HWND {
+        HWND(self.focused_control as *mut core::ffi::c_void)
+    }
+
+    pub(crate) fn thread_id(self) -> u32 {
+        self.thread_id
     }
 
     #[cfg(test)]

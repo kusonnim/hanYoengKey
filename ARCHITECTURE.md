@@ -134,6 +134,21 @@ The replacement implementation may vary depending on the platform APIs used.
 
 ---
 
+## Input Language Service
+
+The Windows-specific Input Language Service reads and synchronizes the input
+language of the focused control and GUI thread captured with the original
+selection. It inspects the keyboard layout and Korean IME conversion state,
+changes them only when necessary, and revalidates the captured target before
+every mutation. It never simulates another Hangul/English key press.
+
+This service is invoked only after replacement succeeds. A synchronization
+error is reported as partial success: the converted text remains in place and
+replacement is neither undone nor repeated. The platform-independent
+Conversion Engine has no dependency on this service or Windows IME APIs.
+
+---
+
 ## Tray Manager
 
 Responsible for:
@@ -294,10 +309,11 @@ The application coordinator owns one conversion operation at a time:
 ```text
 Idle
   -> ReadingSelection
-  -> ValidatingTarget
   -> Converting
+  -> ValidatingTarget
   -> Replacing
   -> RestoringClipboard
+  -> SynchronizingInputLanguage
   -> Completed
   -> Idle
 ```
@@ -315,6 +331,11 @@ UI Automation selection and replacement calls have bounded worker deadlines.
 Clipboard locking, access retries, simulated copy, paste settling, and
 restoration also use bounded deadlines. Timeout and target-change outcomes are
 returned as structured categories rather than blocking the hook thread.
+
+The coordinator maps English-to-Korean conversion to Korean input mode and
+Korean-to-English conversion to English input mode. If synchronization fails
+after replacement, the outcome remains handled so the original Hangul key is
+not replayed against already-converted text.
 
 Clipboard transactions are serialized. They capture all enumerable formats,
 track the clipboard sequence number after each utility-owned write, and restore

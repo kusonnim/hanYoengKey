@@ -5,6 +5,8 @@ mod core;
 mod hook;
 #[cfg(windows)]
 mod input;
+#[cfg(windows)]
+mod input_language;
 mod replace;
 mod selection;
 mod settings;

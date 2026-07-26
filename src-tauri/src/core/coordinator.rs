@@ -2,6 +2,9 @@ use std::sync::Mutex;
 
 use crate::{
     converter::{self, ConversionDirection},
+    input_language::{
+        EnsureInputLanguageResult, InputLanguage, InputLanguageError, InputLanguageService,
+    },
     replace::{ReplaceResult, ReplaceService},
     selection::{SelectionResult, SelectionService, SelectionSnapshot},
     settings::Settings,
@@ -17,6 +20,7 @@ pub(super) enum OperationState {
     Converting,
     Replacing,
     RestoringClipboard,
+    SynchronizingInputLanguage,
     Completed,
 }
 
@@ -39,13 +43,17 @@ pub(super) enum OperationError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ConversionOutcome {
-    Converted,
+    ConvertedAndSynchronized,
+    ConvertedSynchronizationFailed(InputLanguageError),
     Failed(OperationError),
 }
 
 impl ConversionOutcome {
     pub(super) fn handled(self) -> bool {
-        self == Self::Converted
+        matches!(
+            self,
+            Self::ConvertedAndSynchronized | Self::ConvertedSynchronizationFailed(_)
+        )
     }
 }
 
@@ -67,24 +75,35 @@ pub(super) trait SelectionReplacer {
     ) -> ReplaceResult;
 }
 
-pub(super) struct ConversionCoordinator<S, C, R> {
+pub(super) trait InputLanguageSynchronizer {
+    fn ensure(
+        &self,
+        selection: &SelectionSnapshot,
+        desired: InputLanguage,
+    ) -> Result<EnsureInputLanguageResult, InputLanguageError>;
+}
+
+pub(super) struct ConversionCoordinator<S, C, R, L> {
     selection: S,
     converter: C,
     replacer: R,
+    input_language: L,
     state: Mutex<OperationState>,
 }
 
-impl<S, C, R> ConversionCoordinator<S, C, R>
+impl<S, C, R, L> ConversionCoordinator<S, C, R, L>
 where
     S: SelectionReader,
     C: TextConverter,
     R: SelectionReplacer,
+    L: InputLanguageSynchronizer,
 {
-    fn new(selection: S, converter: C, replacer: R) -> Self {
+    fn new(selection: S, converter: C, replacer: R, input_language: L) -> Self {
         Self {
             selection,
             converter,
             replacer,
+            input_language,
             state: Mutex::new(OperationState::Idle),
         }
     }
@@ -122,11 +141,6 @@ where
             }
         };
 
-        *self.state() = OperationState::ValidatingTarget;
-        if !self.replacer.target_is_current(&selection) {
-            return failed(OperationError::TargetChanged);
-        }
-
         *self.state() = OperationState::Converting;
         let Some(direction) = choose_direction(&selection.text) else {
             return failed(OperationError::NoSelection);
@@ -136,25 +150,39 @@ where
             Err(()) => return failed(OperationError::ConversionFailure),
         };
 
+        *self.state() = OperationState::ValidatingTarget;
+        if !self.replacer.target_is_current(&selection) {
+            return failed(OperationError::TargetChanged);
+        }
+
         *self.state() = OperationState::Replacing;
-        let outcome = match self.replacer.replace(&selection, &replacement, settings) {
-            ReplaceResult::Replaced => ConversionOutcome::Converted,
-            ReplaceResult::Unsupported => failed(OperationError::UnsupportedTarget),
-            ReplaceResult::TemporarilyUnavailable => failed(OperationError::ClipboardBusy),
-            ReplaceResult::TargetChanged => failed(OperationError::TargetChanged),
-            ReplaceResult::TimedOut => failed(OperationError::ReplacementTimeout),
+        match self.replacer.replace(&selection, &replacement, settings) {
+            ReplaceResult::Replaced => {}
+            ReplaceResult::Unsupported => return failed(OperationError::UnsupportedTarget),
+            ReplaceResult::TemporarilyUnavailable => return failed(OperationError::ClipboardBusy),
+            ReplaceResult::TargetChanged => return failed(OperationError::TargetChanged),
+            ReplaceResult::TimedOut => return failed(OperationError::ReplacementTimeout),
             ReplaceResult::ClipboardChangedExternally => {
-                failed(OperationError::ClipboardChangedExternally)
+                return failed(OperationError::ClipboardChangedExternally)
             }
             ReplaceResult::Failure(error) => {
                 if settings.debug_logging {
                     eprintln!("[conversion] category=replacement-failure detail={error}");
                 }
-                failed(OperationError::ReplacementFailure)
+                return failed(OperationError::ReplacementFailure);
             }
         };
         *self.state() = OperationState::RestoringClipboard;
-        outcome
+
+        *self.state() = OperationState::SynchronizingInputLanguage;
+        let desired = match direction {
+            ConversionDirection::EnglishToKorean => InputLanguage::Korean,
+            ConversionDirection::KoreanToEnglish => InputLanguage::English,
+        };
+        match self.input_language.ensure(&selection, desired) {
+            Ok(_) => ConversionOutcome::ConvertedAndSynchronized,
+            Err(error) => ConversionOutcome::ConvertedSynchronizationFailed(error),
+        }
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, OperationState> {
@@ -217,8 +245,18 @@ impl SelectionReplacer for ReplaceService {
     }
 }
 
+impl InputLanguageSynchronizer for InputLanguageService {
+    fn ensure(
+        &self,
+        selection: &SelectionSnapshot,
+        desired: InputLanguage,
+    ) -> Result<EnsureInputLanguageResult, InputLanguageError> {
+        self.ensure_input_language(&selection.target, desired)
+    }
+}
+
 pub(super) type ApplicationConversionCoordinator =
-    ConversionCoordinator<SelectionService, ConversionEngine, ReplaceService>;
+    ConversionCoordinator<SelectionService, ConversionEngine, ReplaceService, InputLanguageService>;
 
 impl ApplicationConversionCoordinator {
     pub(super) fn application() -> Self {
@@ -226,6 +264,7 @@ impl ApplicationConversionCoordinator {
             SelectionService::new(),
             ConversionEngine,
             ReplaceService::new(),
+            InputLanguageService::new(),
         )
     }
 }
@@ -271,6 +310,27 @@ mod tests {
         target_current: bool,
     }
 
+    struct FakeInputLanguage {
+        calls: Arc<AtomicUsize>,
+        requested: Arc<Mutex<Option<InputLanguage>>>,
+        result: Result<EnsureInputLanguageResult, InputLanguageError>,
+    }
+
+    impl InputLanguageSynchronizer for FakeInputLanguage {
+        fn ensure(
+            &self,
+            _selection: &SelectionSnapshot,
+            desired: InputLanguage,
+        ) -> Result<EnsureInputLanguageResult, InputLanguageError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            *self
+                .requested
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(desired);
+            self.result
+        }
+    }
+
     impl SelectionReplacer for FakeReplacer {
         fn target_is_current(&self, _selection: &SelectionSnapshot) -> bool {
             self.target_current
@@ -310,10 +370,35 @@ mod tests {
         replacement: ReplaceResult,
         target_current: bool,
     ) -> (
-        ConversionCoordinator<FakeSelection, FakeConverter, FakeReplacer>,
+        ConversionCoordinator<FakeSelection, FakeConverter, FakeReplacer, FakeInputLanguage>,
         Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        Arc<Mutex<Option<InputLanguage>>>,
+    ) {
+        coordinator_with_language_result(
+            selection,
+            converter_fails,
+            replacement,
+            target_current,
+            Ok(EnsureInputLanguageResult::Changed),
+        )
+    }
+
+    fn coordinator_with_language_result(
+        selection: SelectionResult,
+        converter_fails: bool,
+        replacement: ReplaceResult,
+        target_current: bool,
+        language_result: Result<EnsureInputLanguageResult, InputLanguageError>,
+    ) -> (
+        ConversionCoordinator<FakeSelection, FakeConverter, FakeReplacer, FakeInputLanguage>,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        Arc<Mutex<Option<InputLanguage>>>,
     ) {
         let calls = Arc::new(AtomicUsize::new(0));
+        let language_calls = Arc::new(AtomicUsize::new(0));
+        let requested = Arc::new(Mutex::new(None));
         (
             ConversionCoordinator::new(
                 FakeSelection(selection),
@@ -323,14 +408,21 @@ mod tests {
                     result: replacement,
                     target_current,
                 },
+                FakeInputLanguage {
+                    calls: Arc::clone(&language_calls),
+                    requested: Arc::clone(&requested),
+                    result: language_result,
+                },
             ),
             calls,
+            language_calls,
+            requested,
         )
     }
 
     #[test]
     fn no_selection_does_not_replace_and_returns_to_idle() {
-        let (coordinator, calls) = coordinator(
+        let (coordinator, calls, language_calls, _) = coordinator(
             SelectionResult::NoSelection,
             false,
             ReplaceResult::Replaced,
@@ -341,12 +433,13 @@ mod tests {
             failed(OperationError::NoSelection)
         );
         assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(language_calls.load(Ordering::Relaxed), 0);
         assert_eq!(*coordinator.state(), OperationState::Idle);
     }
 
     #[test]
     fn changed_target_does_not_replace() {
-        let (coordinator, calls) = coordinator(
+        let (coordinator, calls, language_calls, _) = coordinator(
             SelectionResult::Success(snapshot("hello")),
             false,
             ReplaceResult::Replaced,
@@ -357,11 +450,12 @@ mod tests {
             failed(OperationError::TargetChanged)
         );
         assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(language_calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]
     fn changed_selection_is_reported_by_replacer() {
-        let (coordinator, calls) = coordinator(
+        let (coordinator, calls, language_calls, _) = coordinator(
             SelectionResult::Success(snapshot("hello")),
             false,
             ReplaceResult::TargetChanged,
@@ -372,11 +466,12 @@ mod tests {
             failed(OperationError::TargetChanged)
         );
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(language_calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]
     fn conversion_failure_never_replaces() {
-        let (coordinator, calls) = coordinator(
+        let (coordinator, calls, language_calls, _) = coordinator(
             SelectionResult::Success(snapshot("hello")),
             true,
             ReplaceResult::Replaced,
@@ -387,12 +482,13 @@ mod tests {
             failed(OperationError::ConversionFailure)
         );
         assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(language_calls.load(Ordering::Relaxed), 0);
         assert_eq!(*coordinator.state(), OperationState::Idle);
     }
 
     #[test]
     fn successful_conversion_replaces_once_and_returns_to_idle() {
-        let (coordinator, calls) = coordinator(
+        let (coordinator, calls, language_calls, requested) = coordinator(
             SelectionResult::Success(snapshot("dkssud")),
             false,
             ReplaceResult::Replaced,
@@ -400,15 +496,62 @@ mod tests {
         );
         assert_eq!(
             coordinator.process(&Settings::default()),
-            ConversionOutcome::Converted
+            ConversionOutcome::ConvertedAndSynchronized
         );
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(language_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            *requested
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            Some(InputLanguage::Korean)
+        );
         assert_eq!(*coordinator.state(), OperationState::Idle);
     }
 
     #[test]
+    fn korean_to_english_requests_english_input_mode() {
+        let (coordinator, _, language_calls, requested) = coordinator(
+            SelectionResult::Success(snapshot("안녕")),
+            false,
+            ReplaceResult::Replaced,
+            true,
+        );
+        assert_eq!(
+            coordinator.process(&Settings::default()),
+            ConversionOutcome::ConvertedAndSynchronized
+        );
+        assert_eq!(language_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            *requested
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            Some(InputLanguage::English)
+        );
+    }
+
+    #[test]
+    fn synchronization_failure_is_partial_success_after_one_replacement() {
+        let (coordinator, replacement_calls, language_calls, _) = coordinator_with_language_result(
+            SelectionResult::Success(snapshot("dkssud")),
+            false,
+            ReplaceResult::Replaced,
+            true,
+            Err(InputLanguageError::TargetChanged),
+        );
+        let outcome = coordinator.process(&Settings::default());
+        assert_eq!(
+            outcome,
+            ConversionOutcome::ConvertedSynchronizationFailed(InputLanguageError::TargetChanged)
+        );
+        assert!(outcome.handled());
+        assert_eq!(replacement_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(language_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn concurrent_activation_is_rejected() {
-        let (coordinator, _) = coordinator(
+        let (coordinator, _, _, _) = coordinator(
             SelectionResult::NoSelection,
             false,
             ReplaceResult::Replaced,
@@ -423,7 +566,7 @@ mod tests {
 
     #[test]
     fn timeout_categories_are_distinct() {
-        let (replacement_timeout, _) = coordinator(
+        let (replacement_timeout, _, _, _) = coordinator(
             SelectionResult::Success(snapshot("hello")),
             false,
             ReplaceResult::TimedOut,
@@ -433,7 +576,7 @@ mod tests {
             replacement_timeout.process(&Settings::default()),
             failed(OperationError::ReplacementTimeout)
         );
-        let (coordinator, _) = coordinator(
+        let (coordinator, _, _, _) = coordinator(
             SelectionResult::TimedOut,
             false,
             ReplaceResult::Replaced,

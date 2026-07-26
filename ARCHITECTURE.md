@@ -114,8 +114,12 @@ Responsibilities include:
 - Korean → English conversion
 - Hangul composition
 - Hangul decomposition
+- exact preservation of line endings, whitespace, indentation, and all
+  non-convertible characters
 
 The conversion engine must remain platform independent.
+It processes input as a character stream and flushes Hangul composition at
+every non-convertible character, copying that boundary character verbatim.
 
 It should have no dependency on:
 

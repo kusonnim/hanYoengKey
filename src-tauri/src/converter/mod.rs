@@ -2,6 +2,8 @@
 //!
 //! The caller always chooses a direction. This module performs no language
 //! detection and has no platform, UI, clipboard, hook, or Tauri dependencies.
+//! Non-convertible characters are copied verbatim, so document structure,
+//! including every line-ending and whitespace character, is preserved.
 
 const HANGUL_BASE: u32 = 0xAC00;
 const HANGUL_END: u32 = 0xD7A3;
@@ -463,6 +465,63 @@ mod tests {
         let input = "123 !@#$%^&*()\n\tdkssud?";
         assert_eq!(convert_to_korean(input), "123 !@#$%^&*()\n\t안녕?");
         assert_eq!(convert_to_english("123 안녕!\n\t"), "123 dkssud!\n\t");
+    }
+
+    #[test]
+    fn converts_multiple_lf_terminated_lines_independently() {
+        let input = "dkssudgktpdy\nrhk\nehddl";
+        let expected = "안녕하세요\n과\n동이";
+        assert_eq!(convert_to_korean(input), expected);
+        assert_eq!(convert_to_english(expected), input);
+    }
+
+    #[test]
+    fn preserves_empty_lines_and_lf_endings() {
+        let input = "안녕하세요\n\n반갑습니다.\n\n감사합니다.\n";
+        let expected = "dkssudgktpdy\n\nqksrkqtmqslek.\n\nrkatkgkqslek.\n";
+        assert_eq!(convert_to_english(input), expected);
+    }
+
+    #[test]
+    fn preserves_crlf_and_standalone_carriage_returns_exactly() {
+        let input = "dkssud\r\n\r\nrhk\rehddl\r\n";
+        let expected = "안녕\r\n\r\n과\r동이\r\n";
+        assert_eq!(convert_to_korean(input), expected);
+        assert_eq!(convert_to_english(expected), input);
+    }
+
+    #[test]
+    fn preserves_tabs_indentation_and_trailing_whitespace() {
+        let input = "\t  dkssud  \t\n    rhk\t \n\tehddl   ";
+        let expected = "\t  안녕  \t\n    과\t \n\t동이   ";
+        assert_eq!(convert_to_korean(input), expected);
+        assert!(convert_to_korean(input).ends_with("   "));
+    }
+
+    #[test]
+    fn preserves_markdown_document_structure() {
+        let input = "# 제목\n\n- 안녕하세요 **세계**.\n- `한글` 2026\n";
+        let expected = "# wpahr\n\n- dkssudgktpdy **tprP**.\n- `gksrmf` 2026\n";
+        assert_eq!(convert_to_english(input), expected);
+    }
+
+    #[test]
+    fn preserves_source_code_structure_and_windows_line_endings() {
+        let input = "fn 인사() {\r\n\tprintln!(\"안녕, 2026!\");\r\n}\r\n";
+        let expected = "fn dlstk() {\r\n\tprintln!(\"dkssud, 2026!\");\r\n}\r\n";
+        assert_eq!(convert_to_english(input), expected);
+    }
+
+    #[test]
+    fn converts_thousands_of_lines_without_changing_structure() {
+        const LINE_COUNT: usize = 5_000;
+        let input = "dkssudgktpdy\r\n\t123 #\r\n".repeat(LINE_COUNT);
+        let expected = "안녕하세요\r\n\t123 #\r\n".repeat(LINE_COUNT);
+        let converted = convert_to_korean(&input);
+
+        assert_eq!(converted, expected);
+        assert_eq!(converted.matches("\r\n").count(), LINE_COUNT * 2);
+        assert_eq!(converted.matches('\t').count(), LINE_COUNT);
     }
 
     #[test]
